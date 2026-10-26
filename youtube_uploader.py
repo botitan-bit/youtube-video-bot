@@ -4,18 +4,16 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
+from googleapiclient.errors import HttpError, ResumableUploadError
 
 logger = logging.getLogger(__name__)
 
-# Обновили права: добавили force-ssl для возможности оставлять комментарии
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.force-ssl"
 ]
 
 def get_youtube_service():
-    """Создает авторизованный клиент YouTube API из переменных окружения."""
     refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN")
     client_id = os.environ.get("YOUTUBE_CLIENT_ID")
     client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET")
@@ -35,7 +33,6 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=creds)
 
 def upload_video(video_path: str, title: str, description: str, tags: list[str]) -> str | None:
-    """Загружает видео на YouTube."""
     youtube = get_youtube_service()
 
     body = {
@@ -43,7 +40,7 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
             "title": title[:100],
             "description": description,
             "tags": tags,
-            "categoryId": "25",  # News & Politics
+            "categoryId": "25",
         },
         "status": {
             "privacyStatus": "public",
@@ -60,11 +57,17 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
             status, response = request.next_chunk()
             if status:
                 logger.info(f"Загрузка видео: {int(status.progress() * 100)}%")
-        except HttpError as e:
+        except (HttpError, ResumableUploadError) as e:
             error_content = e.content.decode("utf-8") if e.content else ""
-            if "quotaExceeded" in error_content or e.resp.status == 403:
+            
+            if "quotaExceeded" in error_content or (hasattr(e, 'resp') and e.resp.status == 403):
                 logger.warning("❌ Квота YouTube API исчерпана. Пропускаем запуск.")
                 return None
+                
+            if "uploadLimitExceeded" in error_content:
+                logger.warning("❌ Достигнут лимит загрузок YouTube. Канал временно заблокирован для загрузки новых видео. Ждем 24 часа.")
+                return None
+                
             raise
 
     video_id = response.get("id")
@@ -72,7 +75,6 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
     return video_id
 
 def post_comment(video_id: str, comment_text: str) -> bool:
-    """Публикует комментарий под видео."""
     try:
         youtube = get_youtube_service()
         body = {
@@ -92,10 +94,9 @@ def post_comment(video_id: str, comment_text: str) -> bool:
         logger.info(f"✅ Комментарий успешно добавлен.")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка при добавлении комментария (возможно, спам-фильтр YouTube): {e}")
+        logger.error(f"❌ Ошибка при добавлении комментария: {e}")
         return False
 
 def build_description(news_text: str, hashtags: str, tg_link: str, max_link: str) -> str:
-    """Формирует описание с хештегами и ссылками на соцсети."""
     social = f"\n\n---\n📢 Наш Telegram: {tg_link}\n📢 MAX: {max_link}"
     return news_text.strip() + "\n\n" + hashtags + social
