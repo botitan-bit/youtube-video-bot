@@ -38,10 +38,12 @@ BLACKLIST_WORDS = [
 ]
 GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Настройки TTS, субтитров и ссылок
-TTS_VOICE = "ru-RU-DmitryNeural"
+# Настройки TTS (Мужской голос), субтитров и ссылок
+TTS_VOICE = "ru-RU-DmitryNeural" # Мужской голос
 WHISPER_MODEL = "small"
-HASHTAGS = "#новости #первые_новости #срочно"
+
+# 5 хештегов для заголовка и описания
+HASHTAGS = "#новости #первые_новости #срочно #СВО #ЧП" 
 TELEGRAM_LINK = "https://t.me/pervonovosti"
 MAX_LINK = "https://max.ru/channel_pervonovosti"
 
@@ -208,7 +210,7 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, list[str]]:
         "Перепиши новость для YouTube. СОХРАНИ все факты. Удали оскорбления и упоминания других каналов/ссылки на Telegram. "
         "Сократи до 800 символов. Без эмодзи и графических символов. "
         "Формат ответа СТРОГО:\n"
-        "TITLE: <заголовок до 80 символов>\n"
+        "TITLE: <заголовок до 70 символов>\n"
         "TEXT: <текст>\n"
         "TAGS: <5 ключевых слов через запятую>\n\n"
         f"Исходный текст:\n{candidate.text}"
@@ -223,13 +225,15 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, list[str]]:
         title_match = re.search(r"TITLE:\s*(.+)", content)
         text_match = re.search(r"TEXT:\s*(.+?)(?:\nTAGS:|$)", content, re.DOTALL)
         tags_match = re.search(r"TAGS:\s*(.+)", content)
-        title = title_match.group(1).strip() if title_match else candidate.text[:80]
+        
+        # Ограничиваем заголовок 70 символами, чтобы вместе с хештегами влезть в лимит 100
+        title = title_match.group(1).strip()[:70] if title_match else candidate.text[:70]
         body = text_match.group(1).strip() if text_match else candidate.text[:800]
         tags = [t.strip() for t in tags_match.group(1).split(",")] if tags_match else []
-        return title[:100], body, tags[:10]
+        return title, body, tags[:10]
     except Exception as e:
         logger.error(f"Ошибка Groq при форматировании: {e}")
-        return candidate.text[:80], candidate.text[:800], []
+        return candidate.text[:70], candidate.text[:800], []
 
 # ============ СКАЧИВАНИЕ ============
 def download_video(url: str, dest: Path) -> bool:
@@ -244,11 +248,11 @@ def download_video(url: str, dest: Path) -> bool:
         logger.error(f"Ошибка скачивания видео: {e}")
         return False
 
-# ============ ГЕНЕРАЦИЯ ОЗВУЧКИ (TTS) С РЕЗЕРВНЫМ ВАРИАНТОМ ============
+# ============ ГЕНЕРАЦИЯ ОЗВУЧКИ ============
 async def generate_tts(text: str, output_path: Path):
     for attempt in range(3):
         try:
-            logger.info(f"Попытка {attempt + 1} генерации озвучки через edge-tts...")
+            logger.info(f"Попытка {attempt + 1} генерации озвучки (Мужской голос)...")
             communicate = edge_tts.Communicate(text, TTS_VOICE)
             await communicate.save(str(output_path))
             logger.info("✅ Озвучка edge-tts успешно сгенерирована.")
@@ -256,24 +260,21 @@ async def generate_tts(text: str, output_path: Path):
         except Exception as e:
             logger.warning(f"Попытка {attempt + 1} не удалась: {e}")
             if attempt < 2:
-                logger.info("Ждем 2 секунды перед повторной попыткой...")
                 await asyncio.sleep(2)
     
-    logger.warning("❌ edge-tts не справился после 3 попыток. Переключаемся на резервный gTTS (Google).")
+    logger.warning("❌ edge-tts не справился. Переключаемся на gTTS.")
     try:
         tts = gTTS(text=text, lang='ru')
         tts.save(str(output_path))
         logger.info("✅ Озвучка gTTS успешно сгенерирована.")
     except Exception as e:
-        logger.error(f"Критическая ошибка: не удалось сгенерировать озвучку никаким способом: {e}")
+        logger.error(f"Критическая ошибка TTS: {e}")
         raise
 
-# ============ ГЕНЕРАЦИЯ СУБТИТРОВ (ФОРМАТ ASS) ============
+# ============ ГЕНЕРАЦИЯ СУБТИТРОВ (ASS) ============
 def generate_subtitles(audio_path: Path, output_ass: Path):
     model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     segments, _ = model.transcribe(str(audio_path), language="ru", word_timestamps=True)
-    
-    # Создаем ASS-файл со встроенными стилями (шрифт, обводка, размер)
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -296,7 +297,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             text = seg.text.strip()
             if not text:
                 continue
-            # Формат времени ASS: H:MM:SS.cc
             start_str = f"{int(start//3600)}:{int((start%3600)//60):02d}:{int(start%60):02d}.{int((start%1)*100):02d}"
             end_str = f"{int(end//3600)}:{int((end%3600)//60):02d}:{int(end%60):02d}.{int((end%1)*100):02d}"
             f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n")
@@ -313,43 +313,39 @@ def has_audio_stream(video_path: Path) -> bool:
     except Exception:
         return False
 
-def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_path: Path) -> bool:
-    video_has_audio = has_audio_stream(input_video)
-    
-    # Берем абсолютный путь к ASS-файлу и меняем слэши для Linux
-    ass_path_escaped = str(ass_file.absolute()).replace("\\", "/")
-    
-    # Используем фильтр 'ass', который в отличие от 'subtitles' работает без сбоев
-    video_filters = (
-        f"[0:v]hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0,"
-        f"ass='{ass_path_escaped}'[outv]"
-    )
-
+def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_path: Path, video_has_audio: bool) -> bool:
     if video_has_audio:
-        audio_filters = (
-            f"[0:a]volume=0.15[bg];"
-            f"[1:a]volume=1.2[tts];"
-            f"[bg][tts]amix=inputs=2:duration=first[aout]"
-        )
-        map_audio = "[aout]"
+        logger.info("Видео содержит оригинальный звук. Оставляем его и отказываемся от TTS/субтитров.")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video.absolute()),
+            "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(output_path.absolute()),
+        ]
     else:
+        logger.info("Видео без звука. Накладываем озвучку и субтитры.")
+        ass_path_escaped = str(ass_file.absolute()).replace("\\", "/")
+        video_filters = (
+            f"[0:v]hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0,"
+            f"ass='{ass_path_escaped}'[outv]"
+        )
         audio_filters = "[1:a]volume=1.2[aout]"
-        map_audio = "[aout]"
+        filter_complex = video_filters + ";" + audio_filters
 
-    filter_complex = video_filters + ";" + audio_filters
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_video.absolute()),
-        "-i", str(tts_audio.absolute()),
-        "-filter_complex", filter_complex,
-        "-map", "[outv]",
-        "-map", map_audio,
-        "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
-        str(output_path.absolute()),
-    ]
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_video.absolute()),
+            "-i", str(tts_audio.absolute()),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-map", "[aout]",
+            "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(output_path.absolute()),
+        ]
     
     try:
         subprocess.run(cmd, check=True, capture_output=True)
@@ -369,10 +365,19 @@ def main():
     if not chosen:
         logger.info("Не удалось выбрать кандидата.")
         return
+    
+    # Получаем заголовок, текст и ключевые слова от Groq
     title, body, tags = format_with_groq(chosen)
     if not body:
         logger.warning("Пустой текст после форматирования, пропускаем.")
         return
+
+    # ФОРМИРУЕМ ФИНАЛЬНЫЙ ЗАГОЛОВОК: Добавляем хештеги и жестко ограничиваем 100 символами
+    final_title = f"{title} {HASHTAGS}"
+    if len(final_title) > 100:
+        final_title = final_title[:97] + "..."
+    
+    logger.info(f"Заголовок для YouTube: {final_title}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -386,30 +391,38 @@ def main():
             return
         logger.info("Видео скачано.")
 
-        try:
-            asyncio.run(generate_tts(body, tts_audio))
-        except Exception as e:
-            logger.error(f"Не удалось создать озвучку: {e}")
-            return
+        video_has_audio = has_audio_stream(raw_video)
 
-        logger.info("Генерация субтитров...")
-        generate_subtitles(tts_audio, ass_file)
-        logger.info("Субтитры готовы.")
+        if not video_has_audio:
+            try:
+                asyncio.run(generate_tts(body, tts_audio))
+            except Exception as e:
+                logger.error(f"Не удалось создать озвучку: {e}")
+                return
+            logger.info("Генерация субтитров...")
+            generate_subtitles(tts_audio, ass_file)
+            logger.info("Субтитры готовы.")
+        else:
+            tts_audio.touch()
+            ass_file.touch()
 
         logger.info("Сборка финального видео...")
-        if not process_video(raw_video, tts_audio, ass_file, final_video):
+        if not process_video(raw_video, tts_audio, ass_file, final_video, video_has_audio):
             logger.error("Не удалось обработать видео.")
             return
 
+        # Формируем описание (текст + хештеги + ссылки)
         description = build_description(body, HASHTAGS, TELEGRAM_LINK, MAX_LINK)
-        video_id = upload_video(str(final_video), title, description, tags)
+        
+        # Загружаем на YouTube
+        video_id = upload_video(str(final_video), final_title, description, tags)
 
         if video_id:
             append_line(POSTED_NEWS_FILE, chosen.post_url)
             append_line(POSTED_HASHES_FILE, text_fingerprint(chosen.text))
             append_line(POSTED_VIDEOS_FILE, hashlib.sha256(Path(final_video).read_bytes()).hexdigest())
-            append_line(PUBLISHED_TITLES_FILE, title)
-            logger.info(f"✅ Успешно опубликовано: {title} ({video_id})")
+            append_line(PUBLISHED_TITLES_FILE, final_title)
+            logger.info(f"✅ Успешно опубликовано: {final_title} ({video_id})")
         else:
             logger.warning("Загрузка не удалась (вероятно, квота). Состояние не обновлено.")
 
