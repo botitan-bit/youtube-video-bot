@@ -19,7 +19,8 @@ import edge_tts
 from gtts import gTTS
 from faster_whisper import WhisperModel
 
-from youtube_uploader import upload_video, build_description
+# Импортируем функцию комментариев
+from youtube_uploader import upload_video, build_description, post_comment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,10 +40,8 @@ BLACKLIST_WORDS = [
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Настройки TTS (Мужской голос), субтитров и ссылок
-TTS_VOICE = "ru-RU-DmitryNeural" # Мужской голос
+TTS_VOICE = "ru-RU-DmitryNeural" 
 WHISPER_MODEL = "small"
-
-# 5 хештегов для заголовка и описания
 HASHTAGS = "#новости #первые_новости #срочно #СВО #ЧП" 
 TELEGRAM_LINK = "https://t.me/pervonovosti"
 MAX_LINK = "https://max.ru/channel_pervonovosti"
@@ -226,7 +225,6 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, list[str]]:
         text_match = re.search(r"TEXT:\s*(.+?)(?:\nTAGS:|$)", content, re.DOTALL)
         tags_match = re.search(r"TAGS:\s*(.+)", content)
         
-        # Ограничиваем заголовок 70 символами, чтобы вместе с хештегами влезть в лимит 100
         title = title_match.group(1).strip()[:70] if title_match else candidate.text[:70]
         body = text_match.group(1).strip() if text_match else candidate.text[:800]
         tags = [t.strip() for t in tags_match.group(1).split(",")] if tags_match else []
@@ -366,13 +364,11 @@ def main():
         logger.info("Не удалось выбрать кандидата.")
         return
     
-    # Получаем заголовок, текст и ключевые слова от Groq
     title, body, tags = format_with_groq(chosen)
     if not body:
         logger.warning("Пустой текст после форматирования, пропускаем.")
         return
 
-    # ФОРМИРУЕМ ФИНАЛЬНЫЙ ЗАГОЛОВОК: Добавляем хештеги и жестко ограничиваем 100 символами
     final_title = f"{title} {HASHTAGS}"
     if len(final_title) > 100:
         final_title = final_title[:97] + "..."
@@ -411,13 +407,20 @@ def main():
             logger.error("Не удалось обработать видео.")
             return
 
-        # Формируем описание (текст + хештеги + ссылки)
         description = build_description(body, HASHTAGS, TELEGRAM_LINK, MAX_LINK)
         
         # Загружаем на YouTube
         video_id = upload_video(str(final_video), final_title, description, tags)
 
         if video_id:
+            # --- НОВЫЙ БЛОК: Пишем комментарий ---
+            comment_text = (
+                f"📢 Наш Telegram: {TELEGRAM_LINK}\n"
+                f"📢 MAX: {MAX_LINK}"
+            )
+            post_comment(video_id, comment_text)
+            # ------------------------------------
+
             append_line(POSTED_NEWS_FILE, chosen.post_url)
             append_line(POSTED_HASHES_FILE, text_fingerprint(chosen.text))
             append_line(POSTED_VIDEOS_FILE, hashlib.sha256(Path(final_video).read_bytes()).hexdigest())
