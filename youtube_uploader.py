@@ -8,7 +8,11 @@ from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# Обновили права: добавили force-ssl для возможности оставлять комментарии
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.force-ssl"
+]
 
 def get_youtube_service():
     """Создает авторизованный клиент YouTube API из переменных окружения."""
@@ -31,15 +35,12 @@ def get_youtube_service():
     return build("youtube", "v3", credentials=creds)
 
 def upload_video(video_path: str, title: str, description: str, tags: list[str]) -> str | None:
-    """
-    Загружает видео на YouTube.
-    Возвращает video_id или None, если квота исчерпана / произошла ошибка.
-    """
+    """Загружает видео на YouTube."""
     youtube = get_youtube_service()
 
     body = {
         "snippet": {
-            "title": title[:100],  # Жесткое ограничение YouTube
+            "title": title[:100],
             "description": description,
             "tags": tags,
             "categoryId": "25",  # News & Politics
@@ -58,7 +59,7 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
         try:
             status, response = request.next_chunk()
             if status:
-                logger.info(f"Загрузка: {int(status.progress() * 100)}%")
+                logger.info(f"Загрузка видео: {int(status.progress() * 100)}%")
         except HttpError as e:
             error_content = e.content.decode("utf-8") if e.content else ""
             if "quotaExceeded" in error_content or e.resp.status == 403:
@@ -69,6 +70,30 @@ def upload_video(video_path: str, title: str, description: str, tags: list[str])
     video_id = response.get("id")
     logger.info(f"✅ Видео загружено: https://youtu.be/{video_id}")
     return video_id
+
+def post_comment(video_id: str, comment_text: str) -> bool:
+    """Публикует комментарий под видео."""
+    try:
+        youtube = get_youtube_service()
+        body = {
+            "snippet": {
+                "videoId": video_id,
+                "topLevelComment": {
+                    "snippet": {
+                        "textOriginal": comment_text
+                    }
+                }
+            }
+        }
+        response = youtube.commentThreads().insert(
+            part="snippet",
+            body=body
+        ).execute()
+        logger.info(f"✅ Комментарий успешно добавлен.")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка при добавлении комментария (возможно, спам-фильтр YouTube): {e}")
+        return False
 
 def build_description(news_text: str, hashtags: str, tg_link: str, max_link: str) -> str:
     """Формирует описание с хештегами и ссылками на соцсети."""
