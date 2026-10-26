@@ -19,7 +19,6 @@ import edge_tts
 from gtts import gTTS
 from faster_whisper import WhisperModel
 
-# Импортируем функцию комментариев
 from youtube_uploader import upload_video, build_description, post_comment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -39,10 +38,8 @@ BLACKLIST_WORDS = [
 ]
 GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Настройки TTS (Мужской голос), субтитров и ссылок
 TTS_VOICE = "ru-RU-DmitryNeural" 
 WHISPER_MODEL = "small"
-HASHTAGS = "#новости #первые_новости #срочно #СВО #ЧП" 
 TELEGRAM_LINK = "https://t.me/pervonovosti"
 MAX_LINK = "https://max.ru/channel_pervonovosti"
 
@@ -203,15 +200,15 @@ def select_best_candidate(candidates: list[Candidate]) -> Optional[Candidate]:
     logger.warning("Groq не дал четкого ответа, берём первого кандидата.")
     return top5[0]
 
-def format_with_groq(candidate: Candidate) -> tuple[str, str, list[str]]:
+def format_with_groq(candidate: Candidate) -> tuple[str, str, str]:
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     prompt = (
         "Перепиши новость для YouTube. СОХРАНИ все факты. Удали оскорбления и упоминания других каналов/ссылки на Telegram. "
-        "Сократи до 800 символов. Без эмодзи и графических символов. "
+        "Сократи до 600 символов (чтобы текст можно было прочитать за 30-40 секунд). Без эмодзи и графических символов. "
         "Формат ответа СТРОГО:\n"
-        "TITLE: <заголовок до 70 символов>\n"
+        "TITLE: <заголовок до 60 символов>\n"
         "TEXT: <текст>\n"
-        "TAGS: <5 ключевых слов через запятую>\n\n"
+        "HASHTAGS: <3-5 ключевых тегов, отражающих суть новости, через пробел, начиная с #>\n\n"
         f"Исходный текст:\n{candidate.text}"
     )
     try:
@@ -222,16 +219,16 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, list[str]]:
         )
         content = resp.choices[0].message.content
         title_match = re.search(r"TITLE:\s*(.+)", content)
-        text_match = re.search(r"TEXT:\s*(.+?)(?:\nTAGS:|$)", content, re.DOTALL)
-        tags_match = re.search(r"TAGS:\s*(.+)", content)
+        text_match = re.search(r"TEXT:\s*(.+?)(?:\nHASHTAGS:|$)", content, re.DOTALL)
+        tags_match = re.search(r"HASHTAGS:\s*(.+)", content)
         
-        title = title_match.group(1).strip()[:70] if title_match else candidate.text[:70]
-        body = text_match.group(1).strip() if text_match else candidate.text[:800]
-        tags = [t.strip() for t in tags_match.group(1).split(",")] if tags_match else []
-        return title, body, tags[:10]
+        title = title_match.group(1).strip()[:60] if title_match else candidate.text[:60]
+        body = text_match.group(1).strip() if text_match else candidate.text[:600]
+        hashtags = tags_match.group(1).strip() if tags_match else "#новости #срочно"
+        return title, body, hashtags
     except Exception as e:
         logger.error(f"Ошибка Groq при форматировании: {e}")
-        return candidate.text[:70], candidate.text[:800], []
+        return candidate.text[:60], candidate.text[:600], "#новости #срочно"
 
 # ============ СКАЧИВАНИЕ ============
 def download_video(url: str, dest: Path) -> bool:
@@ -246,12 +243,38 @@ def download_video(url: str, dest: Path) -> bool:
         logger.error(f"Ошибка скачивания видео: {e}")
         return False
 
-# ============ ГЕНЕРАЦИЯ ОЗВУЧКИ ============
+# ============ ПОЛУЧЕНИЕ ДЛИТЕЛЬНОСТИ ============
+def get_duration(file_path: Path) -> float:
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(file_path)],
+            text=True
+        ).strip()
+        return float(out)
+    except Exception:
+        return 0.0
+
+# ============ УМНАЯ ПРОВЕРКА РЕЧИ ============
+def has_human_speech(video_path: Path) -> bool:
+    """Проверяет, есть ли в видео человеческая речь (а не просто музыка)."""
+    try:
+        # Используем tiny модель для быстрой проверки
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, _ = model.transcribe(str(video_path), language="ru")
+        words = "".join([seg.text for seg in segments]).strip()
+        # Если нейросеть распознала больше 5 слов, значит там точно говорят
+        return len(words.split()) > 5
+    except Exception as e:
+        logger.error(f"Ошибка проверки речи: {e}")
+        return True # В случае ошибки лучше оставить оригинальный звук
+
+# ============ ГЕНЕРАЦИЯ ОЗВУЧКИ (ЭНЕРГИЧНОЙ) ============
 async def generate_tts(text: str, output_path: Path):
     for attempt in range(3):
         try:
-            logger.info(f"Попытка {attempt + 1} генерации озвучки (Мужской голос)...")
-            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            logger.info(f"Попытка {attempt + 1} генерации озвучки (Динамичный мужской голос)...")
+            # rate="+15%" делает голос более энергичным
+            communicate = edge_tts.Communicate(text, TTS_VOICE, rate="+15%")
             await communicate.save(str(output_path))
             logger.info("✅ Озвучка edge-tts успешно сгенерирована.")
             return
@@ -299,21 +322,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             end_str = f"{int(end//3600)}:{int((end%3600)//60):02d}:{int(end%60):02d}.{int((end%1)*100):02d}"
             f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n")
 
-# ============ ПРОВЕРКА ЗВУКА И СБОРКА ВИДЕО ============
-def has_audio_stream(video_path: Path) -> bool:
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(video_path)
-        ]
-        output = subprocess.check_output(cmd, text=True).strip()
-        return "audio" in output
-    except Exception:
-        return False
-
-def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_path: Path, video_has_audio: bool) -> bool:
-    if video_has_audio:
-        logger.info("Видео содержит оригинальный звук. Оставляем его и отказываемся от TTS/субтитров.")
+# ============ СБОРКА ВИДЕО ============
+def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_path: Path, video_has_speech: bool) -> bool:
+    if video_has_speech:
+        logger.info("Видео содержит речь. Оставляем её и отказываемся от TTS/субтитров.")
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_video.absolute()),
@@ -323,13 +335,18 @@ def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_pat
             str(output_path.absolute()),
         ]
     else:
-        logger.info("Видео без звука. Накладываем озвучку и субтитры.")
+        logger.info("Видео без речи. Накладываем озвучку и субтитры.")
         ass_path_escaped = str(ass_file.absolute()).replace("\\", "/")
         video_filters = (
             f"[0:v]hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0,"
             f"ass='{ass_path_escaped}'[outv]"
         )
-        audio_filters = "[1:a]volume=1.2[aout]"
+        # Делаем оригинальный звук тихим фоном (volume=0.10), а озвучку громкой
+        audio_filters = (
+            f"[0:a]volume=0.10[bg];"
+            f"[1:a]volume=1.2[tts];"
+            f"[bg][tts]amix=inputs=2:duration=first[aout]"
+        )
         filter_complex = video_filters + ";" + audio_filters
 
         cmd = [
@@ -364,21 +381,22 @@ def main():
         logger.info("Не удалось выбрать кандидата.")
         return
     
-    title, body, tags = format_with_groq(chosen)
+    title, body, hashtags = format_with_groq(chosen)
     if not body:
         logger.warning("Пустой текст после форматирования, пропускаем.")
         return
 
-    final_title = f"{title} {HASHTAGS}"
+    final_title = f"{title} {hashtags}"
     if len(final_title) > 100:
         final_title = final_title[:97] + "..."
     
-    logger.info(f"Заголовок для YouTube: {final_title}")
+    logger.info(f"Заголовок: {final_title}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         raw_video = tmpdir / "raw.mp4"
         tts_audio = tmpdir / "tts.mp3"
+        fast_tts_audio = tmpdir / "fast_tts.mp3"
         ass_file = tmpdir / "subs.ass"
         final_video = tmpdir / "final.mp4"
 
@@ -387,14 +405,30 @@ def main():
             return
         logger.info("Видео скачано.")
 
-        video_has_audio = has_audio_stream(raw_video)
+        # Умная проверка на наличие человеческой речи
+        video_has_speech = has_human_speech(raw_video)
 
-        if not video_has_audio:
+        if not video_has_speech:
             try:
                 asyncio.run(generate_tts(body, tts_audio))
             except Exception as e:
                 logger.error(f"Не удалось создать озвучку: {e}")
                 return
+            
+            # --- ПОДГОНКА ДЛИНЫ ОЗВУЧКИ ПОД ДЛИНУ ВИДЕО ---
+            video_dur = get_duration(raw_video)
+            audio_dur = get_duration(tts_audio)
+            
+            # Если озвучка длиннее видео, ускоряем её
+            if audio_dur > video_dur and video_dur > 0:
+                tempo = audio_dur / video_dur
+                logger.info(f"Озвучка ({audio_dur:.1f}с) длиннее видео ({video_dur:.1f}с). Ускоряем в {tempo:.2f} раз.")
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", str(tts_audio), 
+                    "-filter:a", f"atempo={tempo}", str(fast_tts_audio)
+                ], check=True, capture_output=True)
+                tts_audio = fast_tts_audio # Используем ускоренную версию
+            
             logger.info("Генерация субтитров...")
             generate_subtitles(tts_audio, ass_file)
             logger.info("Субтитры готовы.")
@@ -403,23 +437,17 @@ def main():
             ass_file.touch()
 
         logger.info("Сборка финального видео...")
-        if not process_video(raw_video, tts_audio, ass_file, final_video, video_has_audio):
+        if not process_video(raw_video, tts_audio, ass_file, final_video, video_has_speech):
             logger.error("Не удалось обработать видео.")
             return
 
-        description = build_description(body, HASHTAGS, TELEGRAM_LINK, MAX_LINK)
+        description = build_description(body, hashtags, TELEGRAM_LINK, MAX_LINK)
         
-        # Загружаем на YouTube
-        video_id = upload_video(str(final_video), final_title, description, tags)
+        video_id = upload_video(str(final_video), final_title, description, tags=[])
 
         if video_id:
-            # --- НОВЫЙ БЛОК: Пишем комментарий ---
-            comment_text = (
-                f"📢 Наш Telegram: {TELEGRAM_LINK}\n"
-                f"📢 MAX: {MAX_LINK}"
-            )
+            comment_text = f"📢 Наш Telegram: {TELEGRAM_LINK}\n📢 MAX: {MAX_LINK}"
             post_comment(video_id, comment_text)
-            # ------------------------------------
 
             append_line(POSTED_NEWS_FILE, chosen.post_url)
             append_line(POSTED_HASHES_FILE, text_fingerprint(chosen.text))
