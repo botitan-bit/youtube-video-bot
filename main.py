@@ -15,8 +15,6 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 from groq import Groq
-import edge_tts
-from gtts import gTTS
 from faster_whisper import WhisperModel
 
 from youtube_uploader import upload_video, build_description, post_comment
@@ -37,8 +35,6 @@ BLACKLIST_WORDS = [
     "айфон", "iphone",
 ]
 GROQ_MODEL = "openai/gpt-oss-120b"
-
-TTS_VOICE = "ru-RU-DmitryNeural" 
 WHISPER_MODEL = "small"
 TELEGRAM_LINK = "https://t.me/pervonovosti"
 MAX_LINK = "https://max.ru/channel_pervonovosti"
@@ -204,7 +200,7 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, str]:
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     prompt = (
         "Перепиши новость для YouTube. СОХРАНИ все факты. Удали оскорбления и упоминания других каналов/ссылки на Telegram. "
-        "Сократи до 600 символов (чтобы текст можно было прочитать за 30-40 секунд). Без эмодзи и графических символов. "
+        "Сократи до 600 символов. Без эмодзи и графических символов. "
         "Формат ответа СТРОГО:\n"
         "TITLE: <заголовок до 60 символов>\n"
         "TEXT: <текст>\n"
@@ -230,7 +226,7 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, str]:
         logger.error(f"Ошибка Groq при форматировании: {e}")
         return candidate.text[:60], candidate.text[:600], "#новости #срочно"
 
-# ============ СКАЧИВАНИЕ ============
+# ============ СКАЧИВАНИЕ И ДЛИТЕЛЬНОСТЬ ============
 def download_video(url: str, dest: Path) -> bool:
     try:
         resp = requests.get(url, stream=True, timeout=120)
@@ -243,7 +239,6 @@ def download_video(url: str, dest: Path) -> bool:
         logger.error(f"Ошибка скачивания видео: {e}")
         return False
 
-# ============ ПОЛУЧЕНИЕ ДЛИТЕЛЬНОСТИ ============
 def get_duration(file_path: Path) -> float:
     try:
         out = subprocess.check_output(
@@ -258,44 +253,35 @@ def get_duration(file_path: Path) -> float:
 def has_human_speech(video_path: Path) -> bool:
     """Проверяет, есть ли в видео человеческая речь (а не просто музыка)."""
     try:
-        # Используем tiny модель для быстрой проверки
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
         segments, _ = model.transcribe(str(video_path), language="ru")
         words = "".join([seg.text for seg in segments]).strip()
-        # Если нейросеть распознала больше 5 слов, значит там точно говорят
         return len(words.split()) > 5
     except Exception as e:
         logger.error(f"Ошибка проверки речи: {e}")
-        return True # В случае ошибки лучше оставить оригинальный звук
+        return True
 
-# ============ ГЕНЕРАЦИЯ ОЗВУЧКИ (ЭНЕРГИЧНОЙ) ============
-async def generate_tts(text: str, output_path: Path):
-    for attempt in range(3):
-        try:
-            logger.info(f"Попытка {attempt + 1} генерации озвучки (Динамичный мужской голос)...")
-            # rate="+15%" делает голос более энергичным
-            communicate = edge_tts.Communicate(text, TTS_VOICE, rate="+15%")
-            await communicate.save(str(output_path))
-            logger.info("✅ Озвучка edge-tts успешно сгенерирована.")
-            return
-        except Exception as e:
-            logger.warning(f"Попытка {attempt + 1} не удалась: {e}")
-            if attempt < 2:
-                await asyncio.sleep(2)
+# ============ ГЕНЕРАЦИЯ ТИТРОВ (БЕЗ ОЗВУЧКИ) ============
+def generate_ass_from_text(text: str, video_duration: float, output_ass: Path):
+    """Разбивает текст на титры и распределяет их равномерно по времени видео."""
     
-    logger.warning("❌ edge-tts не справился. Переключаемся на gTTS.")
-    try:
-        tts = gTTS(text=text, lang='ru')
-        tts.save(str(output_path))
-        logger.info("✅ Озвучка gTTS успешно сгенерирована.")
-    except Exception as e:
-        logger.error(f"Критическая ошибка TTS: {e}")
-        raise
-
-# ============ ГЕНЕРАЦИЯ СУБТИТРОВ (ASS) ============
-def generate_subtitles(audio_path: Path, output_ass: Path):
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(audio_path), language="ru", word_timestamps=True)
+    # Разбиваем текст на предложения
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # Если предложение слишком длинное, режем по запятым
+        if len(s) > 60:
+            sub_parts = re.split(r'(?<=[,;])\s+', s)
+            chunks.extend([part.strip() for part in sub_parts if part.strip()])
+        else:
+            chunks.append(s)
+            
+    total_chars = sum(len(c) for c in chunks)
+    current_time = 0.0
+    
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -312,20 +298,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     with open(output_ass, "w", encoding="utf-8") as f:
         f.write(ass_header)
-        for seg in segments:
-            start = seg.start
-            end = seg.end
-            text = seg.text.strip()
-            if not text:
-                continue
-            start_str = f"{int(start//3600)}:{int((start%3600)//60):02d}:{int(start%60):02d}.{int((start%1)*100):02d}"
-            end_str = f"{int(end//3600)}:{int((end%3600)//60):02d}:{int(end%60):02d}.{int((end%1)*100):02d}"
-            f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n")
+        if total_chars == 0 or video_duration <= 0:
+            return
+            
+        for chunk in chunks:
+            # Вычисляем время на основе количества символов
+            chunk_duration = (len(chunk) / total_chars) * video_duration
+            end_time = current_time + chunk_duration
+            
+            start_str = f"{int(current_time//3600)}:{int((current_time%3600)//60):02d}:{int(current_time%60):02d}.{int((current_time%1)*100):02d}"
+            end_str = f"{int(end_time//3600)}:{int((end_time%3600)//60):02d}:{int(end_time%60):02d}.{int((end_time%1)*100):02d}"
+            
+            # Убираем переносы строк внутри чанка, чтобы ASS не ломался
+            chunk_clean = chunk.replace("\n", " ").strip()
+            f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{chunk_clean}\n")
+            current_time = end_time
 
 # ============ СБОРКА ВИДЕО ============
-def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_path: Path, video_has_speech: bool) -> bool:
+def process_video(input_video: Path, ass_file: Path, output_path: Path, video_has_speech: bool) -> bool:
     if video_has_speech:
-        logger.info("Видео содержит речь. Оставляем её и отказываемся от TTS/субтитров.")
+        logger.info("Видео содержит речь. Оставляем оригинал без изменений.")
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_video.absolute()),
@@ -335,27 +327,18 @@ def process_video(input_video: Path, tts_audio: Path, ass_file: Path, output_pat
             str(output_path.absolute()),
         ]
     else:
-        logger.info("Видео без речи. Накладываем озвучку и субтитры.")
+        logger.info("Видео без речи. Накладываем титры, оригинальный звук (если есть) оставляем.")
         ass_path_escaped = str(ass_file.absolute()).replace("\\", "/")
         video_filters = (
             f"[0:v]hqdn3d=1.5:1.5:6:6,unsharp=5:5:1.0,"
             f"ass='{ass_path_escaped}'[outv]"
         )
-        # Делаем оригинальный звук тихим фоном (volume=0.10), а озвучку громкой
-        audio_filters = (
-            f"[0:a]volume=0.10[bg];"
-            f"[1:a]volume=1.2[tts];"
-            f"[bg][tts]amix=inputs=2:duration=first[aout]"
-        )
-        filter_complex = video_filters + ";" + audio_filters
-
         cmd = [
             "ffmpeg", "-y",
             "-i", str(input_video.absolute()),
-            "-i", str(tts_audio.absolute()),
-            "-filter_complex", filter_complex,
+            "-filter_complex", video_filters,
             "-map", "[outv]",
-            "-map", "[aout]",
+            "-map", "0:a?",  # Берем оригинальный звук, если он есть
             "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -395,8 +378,6 @@ def main():
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         raw_video = tmpdir / "raw.mp4"
-        tts_audio = tmpdir / "tts.mp3"
-        fast_tts_audio = tmpdir / "fast_tts.mp3"
         ass_file = tmpdir / "subs.ass"
         final_video = tmpdir / "final.mp4"
 
@@ -405,39 +386,18 @@ def main():
             return
         logger.info("Видео скачано.")
 
-        # Умная проверка на наличие человеческой речи
         video_has_speech = has_human_speech(raw_video)
 
         if not video_has_speech:
-            try:
-                asyncio.run(generate_tts(body, tts_audio))
-            except Exception as e:
-                logger.error(f"Не удалось создать озвучку: {e}")
-                return
-            
-            # --- ПОДГОНКА ДЛИНЫ ОЗВУЧКИ ПОД ДЛИНУ ВИДЕО ---
             video_dur = get_duration(raw_video)
-            audio_dur = get_duration(tts_audio)
-            
-            # Если озвучка длиннее видео, ускоряем её
-            if audio_dur > video_dur and video_dur > 0:
-                tempo = audio_dur / video_dur
-                logger.info(f"Озвучка ({audio_dur:.1f}с) длиннее видео ({video_dur:.1f}с). Ускоряем в {tempo:.2f} раз.")
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", str(tts_audio), 
-                    "-filter:a", f"atempo={tempo}", str(fast_tts_audio)
-                ], check=True, capture_output=True)
-                tts_audio = fast_tts_audio # Используем ускоренную версию
-            
-            logger.info("Генерация субтитров...")
-            generate_subtitles(tts_audio, ass_file)
-            logger.info("Субтитры готовы.")
+            logger.info(f"Генерация титров для видео длительностью {video_dur:.1f} сек...")
+            generate_ass_from_text(body, video_dur, ass_file)
+            logger.info("Титры готовы.")
         else:
-            tts_audio.touch()
             ass_file.touch()
 
         logger.info("Сборка финального видео...")
-        if not process_video(raw_video, tts_audio, ass_file, final_video, video_has_speech):
+        if not process_video(raw_video, ass_file, final_video, video_has_speech):
             logger.error("Не удалось обработать видео.")
             return
 
@@ -455,7 +415,7 @@ def main():
             append_line(PUBLISHED_TITLES_FILE, final_title)
             logger.info(f"✅ Успешно опубликовано: {final_title} ({video_id})")
         else:
-            logger.warning("Загрузка не удалась (вероятно, квота). Состояние не обновлено.")
+            logger.warning("Загрузка не удалась. Состояние не обновлено.")
 
 if __name__ == "__main__":
     main()
