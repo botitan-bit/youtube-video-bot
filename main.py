@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ============ КОНФИГУРАЦИЯ ============
 SEARCH_WINDOW_HOURS = 18
-# ОБНОВЛЕННЫЙ СПИСОК КАНАЛОВ (убраны ragulaku и pilachzx)
+# СПИСОК КАНАЛОВ (без pilachzx и ragulaku)
 CHANNELS = ["novosti_efir", "mnogonazi", "botcharov", "slavaded1337"]
 
 BLACKLIST_WORDS = [
@@ -122,10 +122,14 @@ def fetch_channel_posts(channel: str) -> list[dict]:
             text_el = msg.select_one(".tgme_widget_message_text")
             text = text_el.get_text(" ", strip=True) if text_el else ""
 
-            video_el = msg.select_one("video")
-            if not video_el:
+            # --- ИЗМЕНЕНИЕ: Ищем все видео в посте ---
+            video_els = msg.select("video")
+            
+            # Если видео нет или их несколько (склейка/альбом), пропускаем пост
+            if len(video_els) != 1:
                 continue
-            video_url = video_el.get("src")
+                
+            video_url = video_els[0].get("src")
             if not video_url:
                 continue
 
@@ -253,7 +257,6 @@ def get_duration(file_path: Path) -> float:
 
 # ============ УМНАЯ ПРОВЕРКА РЕЧИ ============
 def has_human_speech(video_path: Path) -> bool:
-    """Проверяет, есть ли в видео человеческая речь (а не просто музыка)."""
     try:
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
         segments, _ = model.transcribe(str(video_path), language="ru")
@@ -265,16 +268,12 @@ def has_human_speech(video_path: Path) -> bool:
 
 # ============ ГЕНЕРАЦИЯ ТИТРОВ (БЕЗ ОЗВУЧКИ) ============
 def generate_ass_from_text(text: str, video_duration: float, output_ass: Path):
-    """Разбивает текст на титры и распределяет их равномерно по времени видео."""
-    
-    # Разбиваем текст на предложения
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     for s in sentences:
         s = s.strip()
         if not s:
             continue
-        # Если предложение слишком длинное, режем по запятым
         if len(s) > 60:
             sub_parts = re.split(r'(?<=[,;])\s+', s)
             chunks.extend([part.strip() for part in sub_parts if part.strip()])
@@ -304,7 +303,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             return
             
         for chunk in chunks:
-            # Вычисляем время на основе количества символов
             chunk_duration = (len(chunk) / total_chars) * video_duration
             end_time = current_time + chunk_duration
             
