@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 # ============ КОНФИГУРАЦИЯ ============
 SEARCH_WINDOW_HOURS = 18
-CHANNELS = ["novosti_efir", "pilachzx", "mnogonazi", "botcharov", "slavaded1337", "ragulaku"]
+# ОБНОВЛЕННЫЙ СПИСОК КАНАЛОВ (убраны ragulaku и pilachzx)
+CHANNELS = ["novosti_efir", "mnogonazi", "botcharov", "slavaded1337"]
+
 BLACKLIST_WORDS = [
     "животн", "кошк", "собак", "природ", "зоопарк", "питомц",
     "спорт", "футбол", "хоккей", "матч", "чемпионат", "олимпиад",
@@ -309,7 +311,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             start_str = f"{int(current_time//3600)}:{int((current_time%3600)//60):02d}:{int(current_time%60):02d}.{int((current_time%1)*100):02d}"
             end_str = f"{int(end_time//3600)}:{int((end_time%3600)//60):02d}:{int(end_time%60):02d}.{int((end_time%1)*100):02d}"
             
-            # Убираем переносы строк внутри чанка, чтобы ASS не ломался
             chunk_clean = chunk.replace("\n", " ").strip()
             f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{chunk_clean}\n")
             current_time = end_time
