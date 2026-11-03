@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 # ============ КОНФИГУРАЦИЯ ============
 SEARCH_WINDOW_HOURS = 18
-# СПИСОК КАНАЛОВ (без pilachzx и ragulaku)
 CHANNELS = ["novosti_efir", "mnogonazi", "botcharov", "slavaded1337"]
 
 BLACKLIST_WORDS = [
@@ -122,10 +121,9 @@ def fetch_channel_posts(channel: str) -> list[dict]:
             text_el = msg.select_one(".tgme_widget_message_text")
             text = text_el.get_text(" ", strip=True) if text_el else ""
 
-            # --- ИЗМЕНЕНИЕ: Ищем все видео в посте ---
             video_els = msg.select("video")
             
-            # Если видео нет или их несколько (склейка/альбом), пропускаем пост
+            # Если видео нет или их несколько (склейка), пропускаем
             if len(video_els) != 1:
                 continue
                 
@@ -205,12 +203,12 @@ def select_best_candidate(candidates: list[Candidate]) -> Optional[Candidate]:
 def format_with_groq(candidate: Candidate) -> tuple[str, str, str]:
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     prompt = (
-        "Перепиши новость для YouTube. СОХРАНИ все факты. Удали оскорбления и упоминания других каналов/ссылки на Telegram. "
+        "Перепиши новость для YouTube. ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ. СОХРАНИ все факты. Удали оскорбления и упоминания других каналов/ссылки на Telegram. "
         "Сократи до 600 символов. Без эмодзи и графических символов. "
         "Формат ответа СТРОГО:\n"
-        "TITLE: <заголовок до 60 символов>\n"
-        "TEXT: <текст>\n"
-        "HASHTAGS: <3-5 ключевых тегов, отражающих суть новости, через пробел, начиная с #>\n\n"
+        "TITLE: <заголовок до 60 символов на русском>\n"
+        "TEXT: <текст на русском>\n"
+        "HASHTAGS: <3-5 ключевых тегов, отражающих суть новости, через пробел, начиная с #, на русском>\n\n"
         f"Исходный текст:\n{candidate.text}"
     )
     try:
@@ -232,18 +230,23 @@ def format_with_groq(candidate: Candidate) -> tuple[str, str, str]:
         logger.error(f"Ошибка Groq при форматировании: {e}")
         return candidate.text[:60], candidate.text[:600], "#новости #срочно"
 
-# ============ СКАЧИВАНИЕ И ДЛИТЕЛЬНОСТЬ ============
-def download_video(url: str, dest: Path) -> bool:
-    try:
-        resp = requests.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-        with dest.open("wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка скачивания видео: {e}")
-        return False
+# ============ СКАЧИВАНИЕ С ПОВТОРНЫМИ ПОПЫТКАМИ ============
+def download_video(url: str, dest: Path, retries: int = 3) -> bool:
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, stream=True, timeout=120)
+            resp.raise_for_status()
+            with dest.open("wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return True
+        except Exception as e:
+            logger.warning(f"Попытка {attempt + 1} скачивания видео не удалась: {e}")
+            if attempt < retries - 1:
+                time.sleep(2) # Ждем 2 секунды перед повторной попыткой
+    
+    logger.error("Не удалось скачать видео после всех попыток (Telegram CDN).")
+    return False
 
 def get_duration(file_path: Path) -> float:
     try:
@@ -266,7 +269,7 @@ def has_human_speech(video_path: Path) -> bool:
         logger.error(f"Ошибка проверки речи: {e}")
         return True
 
-# ============ ГЕНЕРАЦИЯ ТИТРОВ (БЕЗ ОЗВУЧКИ) ============
+# ============ ГЕНЕРАЦИЯ ТИТРОВ ============
 def generate_ass_from_text(text: str, video_duration: float, output_ass: Path):
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
@@ -337,7 +340,7 @@ def process_video(input_video: Path, ass_file: Path, output_path: Path, video_ha
             "-i", str(input_video.absolute()),
             "-filter_complex", video_filters,
             "-map", "[outv]",
-            "-map", "0:a?",  # Берем оригинальный звук, если он есть
+            "-map", "0:a?", 
             "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -381,7 +384,7 @@ def main():
         final_video = tmpdir / "final.mp4"
 
         if not download_video(chosen.video_url, raw_video):
-            logger.error("Не удалось скачать видео.")
+            logger.error("Не удалось скачать видео. Пропускаем.")
             return
         logger.info("Видео скачано.")
 
